@@ -62,15 +62,21 @@ const LEDGES = [
 ];
 
 const GEARS = [
-  { x: 1114, baseY: 190, phase: 0.4 },
-  { x: 1420, baseY: 170, phase: 2.5 },
-  { x: 1560, baseY: 200, phase: 4.4 },
-].map(gear => ({ ...gear, art: "gear_platform", width: 64, y: 0, previousY: 0 }));
+  { x: 1114, baseY: 190, phase: 0.4, shiftX: 0, shiftY: 155 },
+  { x: 1420, baseY: 170, phase: 2.5, shiftX: -70, shiftY: 125 },
+  { x: 1560, baseY: 200, phase: 4.4, shiftX: -10, shiftY: 95 },
+].map(gear => ({ ...gear, art: "gear_platform", width: 64, baseX: gear.x, y: 0, previousY: 0, previousX: gear.x }));
 
 const SURFACES = [
   ...GROUND_RUNS,
   ...LEDGES.map(ledge => ({ ...ledge, left: ledge.x + 4, right: ledge.x + ledge.width - 4 })),
   ...GEARS.map(gear => Object.assign(gear, { left: gear.x + 5, right: gear.x + 60 })),
+];
+
+// Opposing shutters make both gear changes part of the route.
+const SHUTTERS = [
+  { x: 1378, width: 24, closedGear: 1 },
+  { x: 1810, width: 24, closedGear: 2 },
 ];
 
 const TUFTS = [
@@ -88,7 +94,7 @@ const COIN_POSITIONS = [
   [769, 174], [793, 158], [833, 179],
   [995, 145], [1052, 128], [1128, 153], [1190, 145],
   [1290, 128], [1304, 94], [1311, 61],
-  [1366, 62], [1441, 134], [1515, 110],
+  [1366, 62], [1380, 89], [1555, 58],
   [1602, 156], [1665, 137], [1725, 151],
 ];
 
@@ -101,6 +107,7 @@ const ASSET_NAMES = [
 const KEY_ACTIONS = {
   ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
   Space: "jump", ArrowUp: "jump", KeyW: "jump", KeyZ: "jump",
+  ShiftLeft: "shift", ShiftRight: "shift", KeyX: "shift", KeyK: "shift",
 };
 
 const canvas = document.querySelector("#game");
@@ -115,6 +122,7 @@ const completion = document.querySelector("#completion");
 const replay = document.querySelector("#replay");
 const moveHint = document.querySelector("#move-hint");
 const glideHint = document.querySelector("#glide-hint");
+const shiftHint = document.querySelector("#shift-hint");
 const wallHint = document.querySelector("#wall-hint");
 
 const art = {};
@@ -131,6 +139,12 @@ let inputDevice = "";
 let jumpPressed = false;
 let jumpReleased = false;
 let worldTime = 0;
+let gearMode = 1;
+let gearBlend = 0;
+let windAlpha = 1;
+let shiftCooldown = 0;
+let shiftCount = 0;
+let shakeTime = 0;
 let cameraX = 0;
 let hearts = MAX_HEARTS;
 let collected = 0;
@@ -209,6 +223,7 @@ window.addEventListener("keydown", event => {
   if (action) {
     pointers.clear();
     keys.add(event.code);
+    if (action === "shift" && mode === "playing") shiftGears();
   }
   updateJumpEdges(wasHeld);
   requestStart();
@@ -243,6 +258,7 @@ for (const button of touchButtons) {
     const wasHeld = actionHeld("jump");
     inputDevice = "touch";
     pointers.set(event.pointerId, button.dataset.action);
+    if (button.dataset.action === "shift") shiftGears();
     button.setPointerCapture(event.pointerId);
     updateJumpEdges(wasHeld);
     refreshControls();
@@ -276,16 +292,49 @@ function placeHero(x, ground, hurt = 0) {
   });
 }
 
-function moveGears(reset = false) {
+function shiftGears() {
+  if (shiftCooldown > 0 || mode !== "playing") return;
+  gearMode = gearMode === 1 ? 2 : 1;
+  shiftCooldown = 0.25;
+  shiftCount += 1;
+  shakeTime = 0.18;
+  for (const gear of GEARS) burst(gear.x + 32, gear.y, "spark", 8);
+  // A shutter can close around the player. Move them to the nearest side.
+  for (const shutter of SHUTTERS) {
+    if (shutter.closedGear !== gearMode) continue;
+    if (hero.x + HERO_WIDTH / 2 > shutter.x && hero.x - HERO_WIDTH / 2 < shutter.x + shutter.width) {
+      hero.x = hero.x < shutter.x + shutter.width / 2
+        ? shutter.x - HERO_WIDTH / 2 : shutter.x + shutter.width + HERO_WIDTH / 2;
+      hero.vx = 0;
+    }
+  }
+}
+
+function moveGears(reset = false, dt = STEP) {
+  const target = gearMode === 2 ? 1 : 0;
+  gearBlend = reset ? target : clamp(gearBlend + Math.sign(target - gearBlend) * dt / 0.35, 0, 1);
+  windAlpha = reset ? 1 - target : clamp(windAlpha + (gearMode === 1 ? 1 : -1) * dt / 0.35, 0, 1);
+  const eased = gearBlend * gearBlend * (3 - 2 * gearBlend);
   for (const gear of GEARS) {
-    const y = gear.baseY + BOB_AMPLITUDE * Math.sin(worldTime * BOB_RATE + gear.phase);
+    const bobY = gear.baseY + BOB_AMPLITUDE * Math.sin(worldTime * BOB_RATE + gear.phase);
+    const x = gear.baseX + gear.shiftX * eased;
+    const y = bobY + (gear.shiftY - bobY) * eased;
+    gear.previousX = reset ? x : gear.x;
     gear.previousY = reset ? y : gear.y;
+    gear.x = x;
     gear.y = y;
+    gear.left = x + 5;
+    gear.right = x + 60;
   }
 }
 
 function resetLevel() {
   worldTime = 0;
+  gearMode = 1;
+  gearBlend = 0;
+  shiftCooldown = 0;
+  shiftCount = 0;
+  shakeTime = 0;
   cameraX = 0;
   hearts = MAX_HEARTS;
   collected = 0;
@@ -323,7 +372,7 @@ function finish() {
   mode = "complete";
   finishedAt = worldTime;
   clearInput();
-  document.querySelector("#result").textContent = `齿轮 ${collected} / ${coins.length}`;
+  document.querySelector("#result").textContent = `金币 / Coins ${collected} / ${coins.length} · 换挡 / Shifts ${shiftCount}`;
 }
 
 function showResult() {
@@ -383,6 +432,10 @@ function moveSideways(dt, direction) {
     return true;
   }
 
+  for (const shutter of SHUTTERS) {
+    if (shutter.closedGear === gearMode) collideSides(shutter.x, shutter.x + shutter.width);
+  }
+
   if (hero.y > WALL_TOP && hero.y - HERO_HEIGHT < GROUND_Y) {
     hero.wall = collideSides(WALL_LEFT, WALL_RIGHT);
   }
@@ -396,6 +449,7 @@ function moveVertically(dt, holdingJump) {
   const previousGround = hero.ground;
   if (previousGround?.previousY !== undefined) {
     hero.y += previousGround.y - previousGround.previousY;
+    hero.x += previousGround.x - previousGround.previousX;
   }
 
   hero.buffer = jumpPressed ? JUMP_BUFFER : Math.max(0, hero.buffer - dt);
@@ -414,7 +468,7 @@ function moveVertically(dt, holdingJump) {
   jumpReleased = false;
 
   const centerY = hero.y - HERO_HEIGHT / 2;
-  const insideWind = hero.x >= WIND.x && hero.x < WIND.x + WIND.width
+  const insideWind = gearMode === 1 && hero.x >= WIND.x && hero.x < WIND.x + WIND.width
     && centerY >= WIND.y && centerY < FALL_Y;
   hero.windGlide = holdingJump && insideWind && (hero.windGlide || hero.vy >= 0);
   if (hero.windGlide) {
@@ -429,6 +483,16 @@ function moveVertically(dt, holdingJump) {
     }
   }
 
+  // Rising platforms catch a hero whose body they would otherwise intersect.
+  for (const gear of GEARS) {
+    if (gear === previousGround) continue;
+    if (hero.x + HERO_WIDTH / 2 > gear.left && hero.x - HERO_WIDTH / 2 < gear.right
+      && hero.y > gear.y && hero.y - HERO_HEIGHT < gear.y + 16) {
+      hero.y = gear.y;
+      hero.vy = Math.min(0, hero.vy);
+      hero.ground = gear;
+    }
+  }
   const oldY = hero.y;
   const nextY = oldY + hero.vy * dt;
   const half = HERO_WIDTH / 2;
@@ -486,7 +550,9 @@ function update(dt) {
   }
   if (mode !== "playing") return;
 
-  moveGears();
+  shiftCooldown = Math.max(0, shiftCooldown - dt);
+  shakeTime = Math.max(0, shakeTime - dt);
+  moveGears(false, dt);
   const direction = Number(actionHeld("right")) - Number(actionHeld("left"));
   moveSideways(dt, direction);
   moveVertically(dt, actionHeld("jump"));
@@ -583,11 +649,28 @@ function drawWind() {
   ctx.beginPath();
   ctx.rect(x, WIND.y, WIND.width, HEIGHT - WIND.y);
   ctx.clip();
-  ctx.globalAlpha = 0.85;
+  ctx.globalAlpha = 0.85 * windAlpha;
   for (let y = WIND.y + offset - height; y < HEIGHT; y += height) {
     ctx.drawImage(art.wind, x, y);
   }
   ctx.restore();
+}
+
+function drawShutters() {
+  for (const shutter of SHUTTERS) {
+    if (shutter.closedGear !== gearMode) continue;
+    const x = Math.round(shutter.x - cameraX);
+    if (x < -shutter.width || x > WIDTH) continue;
+    // A tall toothed shutter leaves no unseen route above the screen.
+    ctx.fillStyle = "#35205f";
+    ctx.fillRect(x, 0, shutter.width, HEIGHT);
+    for (let y = 0; y < HEIGHT; y += 30) {
+      ctx.drawImage(art.ground_mid, 18, 0, 24, 30, x, y, shutter.width, 30);
+    }
+    ctx.fillStyle = "#fff1d1";
+    ctx.font = "bold 10px sans-serif";
+    ctx.fillText(shutter.closedGear === 1 ? "2" : "1", x + 9, 105);
+  }
 }
 
 function drawSave() {
@@ -688,6 +771,18 @@ function drawHud() {
     }
   }
 
+  ctx.save();
+  ctx.translate(57, 12);
+  ctx.rotate(worldTime * 1.8);
+  ctx.drawImage(art.gear_platform, 0, 0, art.gear_platform.width, art.gear_platform.height, -7, -7, 14, 14);
+  ctx.restore();
+  ctx.font = "bold 10px sans-serif";
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "#21184f";
+  ctx.strokeText(`GEAR ${gearMode}`, 68, 16);
+  ctx.fillStyle = "#fff8f2";
+  ctx.fillText(`GEAR ${gearMode}`, 68, 16);
+
   const count = String(collected);
   const textX = WIDTH - 8 - (count.length * 8 - 2);
   drawSprite("coin1", textX - 19, 5);
@@ -719,6 +814,8 @@ function setHint(element, visible, worldX, y, opacity = 1) {
 }
 
 function render() {
+  ctx.save();
+  if (shakeTime > 0) ctx.translate(Math.sin(worldTime * 100) > 0 ? 1 : -1, 0);
   ctx.drawImage(art.bg_sky, -Math.round(cameraX * 0.06), 0);
   drawParallax(270, 90, 527, 88, NEAR_DUNES_Y, 0.4);
 
@@ -736,17 +833,20 @@ function render() {
   for (const surface of [...LEDGES, ...GEARS]) {
     drawSprite(surface.art, surface.x - cameraX, surface.y - 4);
   }
+  drawShutters();
   drawSprite("shell_wall", WALL.x - cameraX, WALL_TOP - 3);
   drawSprite("shell_wall", WALL.x - cameraX, GROUND_Y - WALL.visibleHeight - 3);
   drawSave();
   drawCoins();
   drawParticles();
   drawHero();
+  ctx.restore();
 
   if (mode !== "title") drawHud();
   const playing = mode === "playing";
   setHint(moveHint, playing && startTravel < 80, 108, 131, clamp((80 - startTravel) / 24, 0, 1));
   setHint(glideHint, playing && hero.x >= 904 && hero.x <= 1130, 969, 103);
+  setHint(shiftHint, playing && shiftCount === 0 && hero.x >= 1000 && hero.x <= 1370, 1125, 66);
   const nearWall = hero.x + HERO_WIDTH / 2 >= WALL_LEFT - WALL.radius
     && hero.x - HERO_WIDTH / 2 <= WALL_RIGHT + WALL.radius;
   setHint(wallHint, nearWall && (playing || (mode === "complete" && completion.hidden)), WALL.x, 99);
